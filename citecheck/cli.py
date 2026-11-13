@@ -9,7 +9,7 @@ from typing import List
 
 from . import __version__
 from .extract import extract
-from .verify import Source, check
+from .verify import Source, check, check_ref
 
 FAIL_LABEL = "FAIL"
 
@@ -25,11 +25,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ref", help="check against this git revision of --root instead of the working tree")
     p.add_argument("--slack", type=int, default=0, metavar="N",
                    help="accept a snippet that starts up to N lines outside the cited range (default 0)")
-    p.add_argument("--require-quote", action="store_true",
-                   help="treat citations with no snippet (range-only) as problems")
+    p.add_argument("--allow-range-only", action="store_true",
+                   help="do not fail citations that have no quote to compare (they stay marked 'weak'; "
+                        "only the line numbers are checked)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--version", action="version", version=f"citecheck {__version__}")
     return p
+
+
+def _clean(text: str) -> str:
+    """Escape control characters so a crafted report cannot rewrite the terminal output."""
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode() for ch in text)
 
 
 def main(argv: List[str] = None) -> int:
@@ -40,9 +46,16 @@ def main(argv: List[str] = None) -> int:
     if args.slack < 0:
         print("citecheck: --slack must be 0 or more", file=sys.stderr)
         return 2
-    if args.ref is not None and (not args.ref or args.ref.startswith("-")):
-        print("citecheck: --ref must be a git revision (not empty, not starting with '-')", file=sys.stderr)
-        return 2
+    if args.ref is not None:
+        err = check_ref(args.root, args.ref)
+        if err:
+            print(f"citecheck: {err}", file=sys.stderr)
+            return 2
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     src = Source(args.root, args.ref)
     cache: dict = {}
     results = []
@@ -51,7 +64,7 @@ def main(argv: List[str] = None) -> int:
             if rp == "-":
                 text, name = sys.stdin.read(), "<stdin>"
             else:
-                with open(rp, "r", encoding="utf-8", errors="replace") as fh:
+                with open(rp, "r", encoding="utf-8-sig", errors="replace") as fh:
                     text = fh.read()
                 name = rp
             cites = extract(text, name)
@@ -61,11 +74,18 @@ def main(argv: List[str] = None) -> int:
         except ValueError as exc:
             print(f"citecheck: {rp} is not valid JSON: {exc}", file=sys.stderr)
             return 2
+        except RecursionError:
+            print(f"citecheck: {rp} is nested too deeply", file=sys.stderr)
+            return 2
         for c in cites:
-            results.append(check(c, src, args.slack, cache))
+            r = check(c, src, args.slack, cache)
+            if r is not None:
+                results.append(r)
 
     def bad(r):
-        return (not r.ok) or (args.require_quote and r.status == "range-only")
+        if r.status == "range-only":
+            return not args.allow_range_only
+        return not r.ok
 
     problems = [r for r in results if bad(r)]
     counts: dict = {}
@@ -76,6 +96,7 @@ def main(argv: List[str] = None) -> int:
         print(json.dumps({
             "total": len(results),
             "problems": len(problems),
+            "no_citations_found": not results,
             "counts": counts,
             "results": [{"source": r.citation.source, "citation": r.citation.text,
                          "path": r.citation.path, "start": r.citation.start, "end": r.citation.end,
@@ -90,13 +111,13 @@ def main(argv: List[str] = None) -> int:
                 label = "weak"
             else:
                 label = "ok"
-            print(f"{label:<5} {r.citation.source}  {r.citation.text}  {r.status}"
-                  + (f": {r.detail}" if r.detail and label != "ok" else ""))
+            print(_clean(f"{label:<5} {r.citation.source}  {r.citation.text}  {r.status}"
+                         + (f": {r.detail}" if r.detail else "")))
         if not results:
             print("no citations found")
         else:
             parts = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
-            print(f"\n{len(results)} citations: {parts}. {len(problems)} problem(s).")
+            print(f"\n{len(results)} citation{'' if len(results) == 1 else 's'}: {parts}. {len(problems)} problem(s).")
     if not results:
         return 1  # nothing to verify is not a pass
     return 1 if problems else 0

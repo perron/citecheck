@@ -11,10 +11,10 @@ revision.
 Before handing a report to a human, run from the repo root:
 
 ```sh
-citecheck YOUR_REPORT.md --require-quote
+citecheck YOUR_REPORT.md
 ```
 
-Fix or remove every line that starts with `FAIL`. For `moved`, correct the line
+Fix or remove every line that starts with `FAIL`. A citation with no fenced quote under it counts as `FAIL` (`range-only`): add the exact quote or drop the citation. For `moved`, correct the line
 number to the one shown. For `quote-not-found`, re-read the code and quote what
 is really there, or drop the finding. For `missing-file` and `out-of-range`,
 the citation is wrong. Do not edit the repo to make a citation pass. A pass only

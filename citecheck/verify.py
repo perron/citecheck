@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -10,7 +11,16 @@ from typing import List, Optional, Tuple
 from .extract import Citation
 
 MAX_BYTES = 5 * 1024 * 1024
-OK = {"verified", "range-only"}
+OK = {"verified"}
+WEAK = "range-only"
+# Environment variables that would point git at a different repository.
+_GIT_ENV_DROP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+                 "GIT_CEILING_DIRECTORIES", "GIT_PREFIX")
+
+
+def git_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROP}
 
 
 @dataclass
@@ -97,6 +107,8 @@ class Source:
                 rel = os.path.relpath(ap, self.root)
             else:
                 return None, "outside-root", "absolute path is outside --root"
+        if "\x00" in rel:
+            return None, "missing-file", "invalid path (NUL byte)"
         norm = os.path.normpath(rel)
         if norm == ".." or norm.startswith(".." + os.sep):
             return None, "outside-root", "path escapes --root"
@@ -108,10 +120,13 @@ class Source:
             return None, "outside-root", "path resolves outside --root (symlink?)"
         if not os.path.exists(full):
             return None, "missing-file", "no such file"
-        if os.path.isdir(full):
-            return None, "missing-file", "is a directory"
         try:
-            if os.path.getsize(full) > MAX_BYTES:
+            st = os.stat(full)
+            if stat.S_ISDIR(st.st_mode):
+                return None, "missing-file", "is a directory"
+            if not stat.S_ISREG(st.st_mode):
+                return None, "unreadable", "not a regular file"
+            if st.st_size > MAX_BYTES:
                 return None, "unreadable", "file larger than 5 MB"
             with open(full, "rb") as fh:
                 data = fh.read()
@@ -120,10 +135,15 @@ class Source:
         return data.decode("utf-8", "replace").splitlines(), None, ""
 
     def _read_git(self, norm: str):
+        spec = f"{self.ref}:./{norm}"
         try:
-            p = subprocess.run(["git", "-C", self.root, "show", f"{self.ref}:./{norm}"],
-                               capture_output=True)
-        except OSError as exc:
+            sz = subprocess.run(["git", "-C", self.root, "cat-file", "-s", spec],
+                                capture_output=True, env=git_env())
+            if sz.returncode == 0 and int(sz.stdout.strip() or 0) > MAX_BYTES:
+                return None, "unreadable", "file larger than 5 MB"
+            p = subprocess.run(["git", "-C", self.root, "show", spec],
+                               capture_output=True, env=git_env())
+        except (OSError, ValueError) as exc:
             return None, "unreadable", f"git not runnable: {exc}"
         if p.returncode != 0:
             err = p.stderr.decode("utf-8", "replace").strip().splitlines()
@@ -133,29 +153,60 @@ class Source:
         return p.stdout.decode("utf-8", "replace").splitlines(), None, ""
 
 
-def check(c: Citation, src: Source, slack: int = 0, cache: Optional[dict] = None) -> Result:
+def check_ref(root: str, ref: str) -> Optional[str]:
+    """Return an error message if ref is not a usable revision of the repo at root."""
+    if not ref or ref.startswith("-"):
+        return "--ref must be a git revision (not empty, not starting with '-')"
+    try:
+        p = subprocess.run(["git", "-C", root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                           capture_output=True, env=git_env())
+    except OSError as exc:
+        return f"git not runnable: {exc}"
+    if p.returncode != 0:
+        return f"{ref!r} is not a commit in the git repository at --root"
+    return None
+
+
+def check(c: Citation, src: Source, slack: int = 0, cache: Optional[dict] = None) -> Optional[Result]:
+    """Check one citation. Returns None for 'soft' citations (host:port look-alikes)
+    whose file does not exist, which are not file references at all."""
     cache = cache if cache is not None else {}
-    if c.path not in cache:
-        cache[c.path] = src.read(c.path)
-    lines, err, detail = cache[c.path]
-    if err:
-        return Result(c, err, detail)
+    paths = [c.path] + list(c.alts or [])
+    chosen = None
+    for pth in paths:
+        if pth not in cache:
+            try:
+                cache[pth] = src.read(pth)
+            except (OSError, ValueError) as exc:
+                cache[pth] = (None, "unreadable", str(exc))
+        if cache[pth][1] is None:
+            chosen = pth
+            break
+    if chosen is None:
+        first = cache[c.path]
+        if c.soft and first[1] == "missing-file":
+            return None
+        # prefer the most informative error among the candidates
+        return Result(c, first[1], first[2])
+    lines = cache[chosen][0]
     n = len(lines)
     if c.start < 1 or c.end < c.start or c.end > n:
         return Result(c, "out-of-range", f"cites lines {c.start}-{c.end} but the file has {n} lines")
     if c.snippet is None or not c.snippet.strip():
-        return Result(c, "range-only", "lines exist; no snippet to compare")
+        return Result(c, WEAK, "lines exist, but there is no quote to compare, so nothing is verified")
     hits = find_snippet(lines, c.snippet)
     if not hits:
         return Result(c, "quote-not-found", "snippet does not appear anywhere in the file")
+    gapped = len(_segments(c.snippet)) > 1
     for a, b in hits:
-        if c.start - slack <= a <= c.end + slack:
-            if slack and (a < c.start or b > c.end):
-                return Result(c, "verified", f"snippet at lines {a}-{b} (within slack {slack})")
-            return Result(c, "verified", f"snippet at lines {a}-{b}")
-    # Nearest occurrence elsewhere
+        if not (c.start - slack <= a <= c.end + slack):
+            continue
+        if gapped and b > c.end + slack:
+            continue  # an ellipsis quote must fit inside the cited lines
+        return Result(c, "verified", f"snippet at lines {a}-{b}")
     a, b = min(hits, key=lambda h: abs(h[0] - c.start))
     where = f"{a}-{b}" if a != b else str(a)
     more = f" (+{len(hits) - 1} more)" if len(hits) > 1 else ""
-    return Result(c, "moved", f"snippet is at line {where}{more}, not {c.start}-{c.end}"
-                  if c.start != c.end else f"snippet is at line {where}{more}, not {c.start}")
+    cited = f"{c.start}-{c.end}" if c.start != c.end else str(c.start)
+    why = " (a quote with '...' must fit inside the cited lines)" if gapped and c.start - slack <= a <= c.end + slack else ""
+    return Result(c, "moved", f"snippet is at line {where}{more}, not {cited}{why}")

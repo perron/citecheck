@@ -42,7 +42,7 @@ def run(repo, report, *extra, capsys=None, name="r.md"):
 # ---- extraction -------------------------------------------------------
 
 def cites(text):
-    return [(c.path, c.start, c.end) for c in extract_markdown(text, "x.md")]
+    return [(c.path, c.start, c.end) for c in extract_markdown(text, "x.md") if not c.soft]
 
 
 def test_extract_forms():
@@ -117,16 +117,16 @@ def test_find_snippet_multiple_hits():
 
 # ---- verification -----------------------------------------------------
 
-def test_verified_and_range_only(repo, capsys):
+def test_range_only_fails_by_default(repo, capsys):
     code, out = run(repo, "x src/io.py:3\n\n```\ndef load(path):\n```\n\nand src/io.py:8\n", capsys=capsys)
-    assert code == 0
-    assert "1 range-only" in out and "1 verified" in out
-    assert "weak" in out
-
-
-def test_require_quote_fails_range_only(repo, capsys):
-    code, out = run(repo, "src/io.py:8\n", "--require-quote", capsys=capsys)
     assert code == 1
+    assert "1 range-only" in out and "1 verified" in out
+    assert "FAIL" in out and "nothing is verified" in out
+
+
+def test_allow_range_only(repo, capsys):
+    code, out = run(repo, "src/io.py:8\n", "--allow-range-only", capsys=capsys)
+    assert code == 0 and "weak" in out
 
 
 def test_moved_reports_actual_line(repo, capsys):
@@ -178,7 +178,7 @@ def test_symlink_escape_blocked(repo, tmp_path_factory, capsys):
 
 
 def test_absolute_path_inside_root_ok(repo, capsys):
-    code, out = run(repo, f"{repo}/src/io.py:3\n", capsys=capsys)
+    code, out = run(repo, f"{repo}/src/io.py:3\n\n```\ndef load(path):\n```\n", capsys=capsys)
     assert code == 0
 
 
@@ -215,7 +215,7 @@ def test_bad_args_exit_2(repo, capsys):
 
 
 def test_stdin(repo, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "stdin", io.StringIO("see src/io.py:3\n"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("see src/io.py:3\n\n```\ndef load(path):\n```\n"))
     assert main(["-", "--root", str(repo)]) == 0
 
 
@@ -240,7 +240,7 @@ def test_ref_mode_checks_old_revision(repo, capsys):
 
 
 def test_module_entry_point(repo):
-    (repo / "r.md").write_text("src/io.py:3\n")
+    (repo / "r.md").write_text("src/io.py:3\n\n```\ndef load(path):\n```\n")
     p = subprocess.run([sys.executable, "-m", "citecheck", "r.md"], cwd=repo, capture_output=True,
                        text=True, env={**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(__file__))})
     assert p.returncode == 0, p.stderr
@@ -251,3 +251,127 @@ def test_ref_cannot_be_an_option(repo, capsys):
     p.write_text("src/io.py:1\n")
     assert main([str(p), "--root", str(repo), "--ref=--output=/tmp/x"]) == 2
     assert main([str(p), "--root", str(repo), "--ref", ""]) == 2
+
+
+# ---- regressions from the adversarial review --------------------------
+
+def test_ellipsis_cannot_stitch_across_functions(repo, capsys):
+    rep = "src/io.py:3\n\n```\ndef load(path):\n...\ndef save(path, text):\n```\n"
+    code, out = run(repo, rep, capsys=capsys)
+    assert code == 1 and "moved" in out and "must fit inside the cited lines" in out
+    code, out = run(repo, "src/io.py:3-8\n\n```\ndef load(path):\n...\ndef save(path, text):\n```\n", capsys=capsys)
+    assert code == 0
+
+
+def test_verified_line_shows_span(repo, capsys):
+    out = run(repo, "src/io.py:3\n\n```\ndef load(path):\n```\n", capsys=capsys)[1]
+    assert "verified: snippet at lines 3-3" in out
+
+
+def test_extensionless_and_dotfile_citations(repo, capsys):
+    (repo / "Dockerfile").write_text("FROM scratch\n")
+    (repo / ".gitignore").write_text("*.pyc\n")
+    rep = "Dockerfile:1\n\n```\nNOT_REAL\n```\n\n.gitignore:1\n\n```\n*.pyc\n```\n"
+    code, out = run(repo, rep, capsys=capsys)
+    assert code == 1 and "1 quote-not-found" in out and "1 verified" in out
+
+
+def test_host_port_lookalikes_ignored_unless_file_exists(repo, capsys):
+    rep = "talks to redis.svc:6379 and kubernetes.default.svc:443 and api.internal:8080\n"
+    code, out = run(repo, rep, capsys=capsys)
+    assert "no citations found" in out
+    (repo / "redis.svc").write_text("a\n")
+    code, out = run(repo, "redis.svc:1\n", capsys=capsys)
+    assert "range-only" in out
+
+
+def test_github_blob_url_with_slashed_branch(repo, capsys):
+    rep = ("https://github.com/o/r/blob/feature/login/src/io.py#L3\n\n```\ndef load(path):\n```\n")
+    assert run(repo, rep, capsys=capsys)[0] == 0
+    rep = "https://GitHub.com/o/r/blob/main/src/io.py#L3\n\n```\ndef load(path):\n```\n"
+    assert run(repo, rep, capsys=capsys)[0] == 0
+
+
+def test_blockquoted_fence_is_a_quote(repo, capsys):
+    rep = "src/io.py:3\n\n> ```\n> not_in_file()\n> ```\n"
+    code, out = run(repo, rep, capsys=capsys)
+    assert code == 1 and "quote-not-found" in out
+
+
+def test_indented_fence_is_a_quote(repo, capsys):
+    rep = "1. src/io.py:3\n\n   ```\n   not_in_file()\n   ```\n"
+    assert "quote-not-found" in run(repo, rep, capsys=capsys)[1]
+
+
+def test_json_string_and_float_lines(repo, capsys):
+    data = {"findings": [
+        {"file": "src/io.py", "start_line": "3", "end_line": "999", "snippet": "def load(path):"},
+        {"file": "src/io.py", "line": 3.0, "snippet": "eval(x)"},
+        {"file": "src/io.py", "line": 3.5, "snippet": "def load(path):"},
+        {"file": "src/io.py", "line": "abc"}]}
+    code, out = run(repo, json.dumps(data), "--json", capsys=capsys, name="r.json")
+    d = json.loads(out)
+    assert d["total"] == 4
+    assert [r["status"] for r in d["results"]] == ["out-of-range", "quote-not-found", "out-of-range", "out-of-range"]
+
+
+def test_json_meta_path_does_not_inherit_snippet_or_count_start(repo, capsys):
+    data = {"file": "src/io.py", "line": 3, "snippet": "def load(path):",
+            "meta": {"path": "Dockerfile", "start": 1}}
+    d = json.loads(run(repo, json.dumps(data), "--json", capsys=capsys, name="r.json")[1])
+    assert d["total"] == 1 and d["problems"] == 0
+
+
+def test_json_locations_inherit_parent_snippet(repo, capsys):
+    data = {"evidence": "def load(path):", "locations": [{"file": "src/io.py", "line": 3}]}
+    assert run(repo, json.dumps(data), capsys=capsys, name="r.json")[0] == 0
+
+
+def test_nul_in_path_and_deep_json_do_not_crash(repo, capsys):
+    out = run(repo, json.dumps({"file": "src/io.py\u0000", "line": 1}), capsys=capsys, name="n.json")[1]
+    assert "missing-file" in out
+    p = repo / "deep.json"
+    p.write_text("[" * 5000 + "]" * 5000)
+    assert main([str(p), "--root", str(repo)]) == 2
+
+
+def test_fifo_is_not_opened(repo, capsys):
+    os.mkfifo(repo / "pipe.txt")
+    out = run(repo, "pipe.txt:1\n", capsys=capsys)[1]
+    assert "not a regular file" in out
+
+
+def test_control_characters_are_escaped(repo, capsys):
+    data = {"file": "a\rok.py", "line": 1}
+    out = run(repo, json.dumps(data), capsys=capsys, name="c.json")[1]
+    assert "\r" not in out and "\\r" in out
+
+
+def test_bom_json(repo, capsys):
+    p = repo / "bom.json"
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps([{"file": "src/io.py", "line": 3, "snippet": "def load(path):"}]).encode())
+    assert main([str(p), "--root", str(repo)]) == 0
+
+
+def test_bad_ref_is_usage_error(repo, capsys):
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "one")
+    p = repo / "r.md"
+    p.write_text("src/io.py:3\n")
+    assert main([str(p), "--root", str(repo), "--ref", "nosuchref"]) == 2
+
+
+def test_git_dir_env_is_ignored(repo, tmp_path_factory, monkeypatch, capsys):
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "one")
+    other = tmp_path_factory.mktemp("other")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(other)], check=True)
+    (other / "src").mkdir()
+    (other / "src" / "io.py").write_text("ONLY_IN_OTHER = 1\n")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "x")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    code, out = run(repo, "src/io.py:1\n\n```\nONLY_IN_OTHER = 1\n```\n", "--ref", "HEAD", capsys=capsys)
+    assert code == 1

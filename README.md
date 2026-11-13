@@ -12,10 +12,11 @@ report, opens every cited file, and tells you which citations are real.
 **Before:** you open each cited file by hand to see whether the agent's finding
 points at real code.
 **After:** `citecheck REPORT.md` prints one line per citation and exits `1` if
-any is missing, past the end of the file, moved, or quotes code that is not
-there.
+any is missing, past the end of the file, moved, quotes code that is not
+there, or has no quote to check at all.
 
-No model, no network, no dependencies. Python 3.9+ standard library only.
+No model, no network, no dependencies. Python 3.9+ standard library only
+(the test suite passes on Python 3.9 and 3.13).
 
 ## Quick start
 
@@ -46,7 +47,7 @@ citecheck REPORT.md
 ```
 
 ```text
-ok    REPORT.md:3  src/auth.py:6  verified
+ok    REPORT.md:3  src/auth.py:6  verified: snippet at lines 6-6
 FAIL  REPORT.md:9  src/auth.py:9  moved: snippet is at line 10, not 9
 FAIL  REPORT.md:15  src/config.py:3  missing-file: no such file
 FAIL  REPORT.md:17  src/auth.py:40-44  out-of-range: cites lines 40-44 but the file has 10 lines
@@ -86,11 +87,19 @@ That prints `"total": 3`, `"problems": 1` and counts of 2 `verified` and 1
 
 **Markdown.** Citations are `path:LINE`, `path:START-END`, `path:LINE:COL`,
 `path#L10-L20`, and GitHub `blob` URLs ending in `#L10-L20` (the ref in the URL
-is ignored; the path is checked against `--root`). Other URLs, `host:port`
-text and versions are ignored. Citations inside fenced code blocks are
-ignored. If a line has exactly one citation and the next non-blank line opens
-a fenced code block, that block is the quote to verify. Otherwise the citation
-is checked for range only.
+is not used; every split of the URL into ref and path is tried, shortest ref
+first, and the first path that exists under `--root` wins). The path needs a
+file extension, a leading dot (`.gitignore:1`), or one of a few well-known
+names (`Dockerfile`, `Makefile`, `Gemfile`, ...). Other extensionless paths such
+as `bin/run:12` are not recognised. Other URLs are ignored. Bare names with an
+uncommon extension, such as `redis.svc:6379`, are treated as `host:port` and
+ignored unless a file of that name exists. Citations inside fenced code blocks
+are ignored.
+
+If a line has exactly one citation and the next non-blank line opens a fenced
+code block (also inside a list item or a `>` blockquote), that block is the
+quote to verify. A line with two or more citations gets no quote, so each of
+them is `range-only`.
 
 **JSON.** Any object with a `file`, `path`, `filename` or `file_path` string and
 a line given as `line`, `start_line`/`end_line`, `lines: [a, b]` or similar,
@@ -101,8 +110,8 @@ string on the same object (or a parent finding) is the quote.
 
 | Status | Meaning | Counts as problem |
 |---|---|---|
-| `verified` | the quoted snippet starts inside the cited lines | no |
-| `range-only` | the lines exist, but there was no quote to compare (shown as `weak`) | only with `--require-quote` |
+| `verified` | the quoted snippet starts inside the cited lines (and, if it uses `...`, ends inside them too) | no |
+| `range-only` | the lines exist, but there was no quote to compare, so nothing about the claim is verified | yes, unless `--allow-range-only` |
 | `moved` | the snippet exists in the file but not at the cited lines; the real line is shown | yes |
 | `quote-not-found` | the snippet is not anywhere in the file | yes |
 | `out-of-range` | cited lines are past the end of the file, or the range is invalid | yes |
@@ -110,22 +119,27 @@ string on the same object (or a parent finding) is the quote.
 | `outside-root` | absolute path, `..` or symlink that leaves `--root` (never read) | yes |
 | `unreadable` | file over 5 MB or unreadable | yes |
 
-Snippet matching ignores indentation, runs of whitespace and blank lines. A
-line that is only `...` (or `// ...`, `# ...`) lets the quote skip code; the
-pieces must still appear in order.
+Snippet matching compares whole lines. It ignores indentation, runs of
+whitespace (so `"a  b"` and `"a b"` count as equal) and blank lines. A quote
+that is only part of a line, such as `x =` for the line `x = 1`, is
+`quote-not-found`. A line that is only `...` (or `// ...`, `# ...`) lets the
+quote skip code; the pieces must still appear in order, and the whole quote
+must fit inside the cited lines, so cite the whole range you are quoting.
 
 Exit codes: `0` all clean, `1` at least one problem (or no citations found:
-nothing verified is not a pass), `2` usage error such as an unreadable report
-or invalid JSON.
+nothing verified is not a pass), `2` usage error such as an unreadable report,
+invalid or too deeply nested JSON, or a `--ref` that is not a commit in the
+repository at `--root`. Control characters in a report are escaped in the
+output.
 
 ## Options
 
 | Option | Effect |
 |---|---|
 | `--root DIR` | repo root the cited paths are relative to (default `.`) |
-| `--ref REV` | read files from a git revision instead of the working tree |
+| `--ref REV` | read files from a git revision of the repo at `--root` instead of the working tree (`GIT_DIR` and similar variables are ignored) |
 | `--slack N` | accept a snippet that starts up to N lines outside the cited range |
-| `--require-quote` | treat `range-only` citations as problems |
+| `--allow-range-only` | do not fail citations that have no quote (they are still printed as `weak`) |
 | `--json` | machine-readable output |
 
 Reports can be given as several files, or `-` for stdin.
@@ -134,11 +148,13 @@ Reports can be given as several files, or `-` for stdin.
 
 - A `verified` citation proves the quoted code is where the report says. It does
   not prove the report's claim about that code is right. Read the findings.
-- `range-only` proves almost nothing: a line number exists. Use
-  `--require-quote` if you want every citation backed by a quote.
+- `range-only` proves almost nothing: a line number exists. That is why it fails
+  by default; `--allow-range-only` is for reports you know carry no quotes.
 - Only fenced blocks directly under a citation (and JSON snippet fields) are
   compared. Inline `` `code` `` in prose is not.
 - It does not follow renamed or moved files and does not check function names.
+- Quotes must be whole lines. In JSON, parent snippets are inherited only by
+  children whose key contains `loc` (such as `locations`).
 
 ## Inspiration
 
@@ -164,7 +180,8 @@ python -m pytest -q
 ## Point your agent at it
 
 Running an audit or review agent? Have it run `citecheck` on its own report
-before it hands the report over, and fix or drop every `FAIL` line. See
+before it hands the report over, and fix or drop every `FAIL` line (a
+citation with no quote is one). See
 [AGENTS.md](AGENTS.md) for instructions written for agents.
 
 ## License
