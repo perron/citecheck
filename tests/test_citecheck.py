@@ -244,3 +244,10 @@ def test_module_entry_point(repo):
     p = subprocess.run([sys.executable, "-m", "citecheck", "r.md"], cwd=repo, capture_output=True,
                        text=True, env={**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(__file__))})
     assert p.returncode == 0, p.stderr
+
+
+def test_ref_cannot_be_an_option(repo, capsys):
+    p = repo / "r.md"
+    p.write_text("src/io.py:1\n")
+    assert main([str(p), "--root", str(repo), "--ref=--output=/tmp/x"]) == 2
+    assert main([str(p), "--root", str(repo), "--ref", ""]) == 2

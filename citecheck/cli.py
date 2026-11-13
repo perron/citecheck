@@ -40,6 +40,9 @@ def main(argv: List[str] = None) -> int:
     if args.slack < 0:
         print("citecheck: --slack must be 0 or more", file=sys.stderr)
         return 2
+    if args.ref is not None and (not args.ref or args.ref.startswith("-")):
+        print("citecheck: --ref must be a git revision (not empty, not starting with '-')", file=sys.stderr)
+        return 2
     src = Source(args.root, args.ref)
     cache: dict = {}
     results = []
