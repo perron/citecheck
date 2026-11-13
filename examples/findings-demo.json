@@ -1,0 +1,10 @@
+{
+  "_note": "Invented demo data for citecheck. Matches the repo built by examples/make-demo.sh.",
+  "findings": [
+    {"title": "Weak hash", "file": "src/auth.py", "line": 6,
+     "snippet": "digest = hashlib.md5(given.encode()).hexdigest()"},
+    {"title": "SQL concatenation", "file": "src/auth.py", "start_line": 9, "end_line": 10,
+     "code": "return \"SELECT * FROM users WHERE name = '\" + name + \"'\""},
+    {"title": "Invented", "file": "src/auth.py", "line": 3, "snippet": "eval(given)"}
+  ]
+}
