@@ -154,7 +154,9 @@ Reports can be given as several files, or `-` for stdin.
   compared. Inline `` `code` `` in prose is not.
 - It does not follow renamed or moved files and does not check function names.
 - Quotes must be whole lines. In JSON, parent snippets are inherited only by
-  children whose key contains `loc` (such as `locations`).
+  children whose key contains `location` (such as `locations`).
+- `--slack` moves the allowed start of a quote; a quote that uses `...` must still
+  end inside the cited lines.
 
 ## Inspiration
 

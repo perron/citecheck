@@ -185,6 +185,11 @@ def _parse_lines(d: dict):
     return start, (end if end is not None else start)
 
 
+def _is_location_key(k) -> bool:
+    k = str(k).lower()
+    return "location" in k or k in ("loc", "locs")
+
+
 def extract_json(data, name: str) -> List[Citation]:
     out: List[Citation] = []
 
@@ -201,8 +206,8 @@ def extract_json(data, name: str) -> List[Citation]:
                 out.append(Citation(f"{name}:{pointer}", fpath, rng[0], rng[1], snip,
                                     f"{fpath}:{rng[0]}" + (f"-{rng[1]}" if rng[1] != rng[0] else "")))
             for k, v in node.items():
-                # a parent's snippet is inherited only by location-like children
-                walk(v, f"{pointer}.{k}", snip if "loc" in str(k).lower() else None)
+                # a parent's snippet is inherited only by children whose key says 'location'
+                walk(v, f"{pointer}.{k}", snip if _is_location_key(k) else None)
         elif isinstance(node, list):
             for idx, v in enumerate(node):
                 walk(v, f"{pointer}[{idx}]", inherited)

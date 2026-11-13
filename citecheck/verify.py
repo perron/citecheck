@@ -137,6 +137,10 @@ class Source:
     def _read_git(self, norm: str):
         spec = f"{self.ref}:./{norm}"
         try:
+            ty = subprocess.run(["git", "-C", self.root, "cat-file", "-t", spec],
+                                capture_output=True, env=git_env())
+            if ty.returncode == 0 and ty.stdout.strip() != b"blob":
+                return None, "missing-file", "is a directory or not a regular file in " + self.ref
             sz = subprocess.run(["git", "-C", self.root, "cat-file", "-s", spec],
                                 capture_output=True, env=git_env())
             if sz.returncode == 0 and int(sz.stdout.strip() or 0) > MAX_BYTES:
@@ -201,7 +205,7 @@ def check(c: Citation, src: Source, slack: int = 0, cache: Optional[dict] = None
     for a, b in hits:
         if not (c.start - slack <= a <= c.end + slack):
             continue
-        if gapped and b > c.end + slack:
+        if gapped and b > c.end:
             continue  # an ellipsis quote must fit inside the cited lines
         return Result(c, "verified", f"snippet at lines {a}-{b}")
     a, b = min(hits, key=lambda h: abs(h[0] - c.start))

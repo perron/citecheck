@@ -375,3 +375,26 @@ def test_git_dir_env_is_ignored(repo, tmp_path_factory, monkeypatch, capsys):
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     code, out = run(repo, "src/io.py:1\n\n```\nONLY_IN_OTHER = 1\n```\n", "--ref", "HEAD", capsys=capsys)
     assert code == 1
+
+
+def test_slack_does_not_let_ellipsis_quote_run_past_range(repo, capsys):
+    rep = "src/io.py:3\n\n```\ndef load(path):\n...\ndef save(path, text):\n```\n"
+    assert run(repo, rep, "--slack", "9", capsys=capsys)[0] == 1
+
+
+def test_json_key_with_loc_substring_does_not_inherit(repo, capsys):
+    data = {"file": "src/io.py", "line": 3, "snippet": "def load(path):",
+            "block": {"file": "Dockerfile", "line": 1}}
+    (repo / "Dockerfile").write_text("FROM scratch\n")
+    out = run(repo, json.dumps(data), "--allow-range-only", "--json", capsys=capsys, name="b.json")[1]
+    d = json.loads(out)
+    assert [r["status"] for r in d["results"]] == ["verified", "range-only"]
+
+
+def test_ref_directory_is_not_a_file(repo, capsys):
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "one")
+    data = {"file": "src", "line": 1, "snippet": "io.py"}
+    out = run(repo, json.dumps(data), "--ref", "HEAD", capsys=capsys, name="d.json")[1]
+    assert "missing-file" in out
